@@ -62,5 +62,29 @@ tcp_synack_retries
   可以用命令```netstat -s |grep "SYNs to LISTEN"```来查看,但是如果要调整,accept queue也要调整
   
 #### 四次挥手
+![img_1.png](img_1.png)
+从图中可以看出,若服务器主动关闭连接,在四次挥手之后端口会变为TIME_WAIT状态,状态停留时
+长为2MSL,这个状态只有在主动关闭连接方出现,另一端在连接断开后立刻投入使用.
 
+```MSL```是一个TCP分段可以存在于互联网系统中的最大时长,RFC 793指出MSL为2分钟,
+但在LINUX系统中一般为30s,通过下面这个命令可以确定一些LINUX系统上的MSL数值:
+```ini
+#/proc/sys/net/ipv4/tcp_fin_timeout
+tcp_fin_timeout 60
+```
+
+TIME_WAIT状态限制是比较严格的,设置TIME_WAIT状态主要有两个目的:
+- 防止一个连接的延迟分段被后面新建的连接接收
+- 确保远程端已关闭连接
+
+大量的TIME_WAIT状态连接会占用文件句柄(FD),如果超过fd上限,后续连接就无法建立.解决方案如下:
+- 修改```/proc/sys/net/ipv4/ip_local_port_range```,增加更多的可用端口
+- 在不同的机器上边部署更多的应用
+
+还有一些修改系统参数的解决方案,但是有一些风险.
+```ini
+#客户端有用
+#/proc/sys/net/ipv4/tcp_tw_reuse
+tcp_tw_reuse
+```
 #### 数据传输
