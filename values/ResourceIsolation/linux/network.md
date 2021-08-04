@@ -83,8 +83,36 @@ TIME_WAIT状态限制是比较严格的,设置TIME_WAIT状态主要有两个目�
 
 还有一些修改系统参数的解决方案,但是有一些风险.
 ```ini
-#客户端有用
+#客户端有用,前提条件是/proc/sys/net/ipv4/tcp_timestamps不为0
 #/proc/sys/net/ipv4/tcp_tw_reuse
 tcp_tw_reuse
 ```
 #### 数据传输
+
+
+
+#### 查看丢包
+- 操作系统处理不过来
+```shell
+cat /proc/net/dev
+```
+每个网络接口一行统计数据,第 4 列（errs）是接收出错的数据包数量,第 5 列（drop）是接收不过来丢弃的数量.
+
+- 应用程序处理不过来
+```shell
+cat /proc/net/netstat | awk '/TcpExt/ { print $21,$22 }'
+```
+
+这里主要查看半连接队列和全连接队列是否已满
+
+- 内存不足
+
+查看内存分配
+```shell
+cat /proc/sys/net/ipv4/tcp_mem
+```
+
+查看内存使用了多少
+```shell
+cat /proc/net/sockstat
+```
