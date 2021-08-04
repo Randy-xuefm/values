@@ -87,6 +87,10 @@ TIME_WAIT状态限制是比较严格的,设置TIME_WAIT状态主要有两个目�
 #/proc/sys/net/ipv4/tcp_tw_reuse
 tcp_tw_reuse
 ```
+查看tcp连接统计信息,可关注一下TIME_WAIT状态下的连接数
+```shell
+netstat -an|awk '/tcp/ {print $6}'|sort|uniq -c
+```
 #### 数据传输
 
 
