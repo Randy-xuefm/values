@@ -30,4 +30,6 @@ leader在指定间隔时间,发送心跳给follower,保持leader身份.
 当集群环境下出现多个leader的时候,这种现象称为脑裂.
 raft协议是如何解决的呢?
 
+Term,每一次选举,Term递增,这样防止脑裂.
+当出现两个leader,Term小的自动变为follower.
 
