@@ -94,7 +94,6 @@ netstat -an|awk '/tcp/ {print $6}'|sort|uniq -c
 #### 数据传输
 
 
-
 #### 查看丢包
 - 操作系统处理不过来
 ```shell
