@@ -99,4 +99,26 @@ public void start() {
 }
 ```
 接下来主要分析下```SmartLifecycle```相关bean是在什么时候调用的.
+```
+//spring 容器启动过程,最后一步
+protected void finishRefresh() {
+    // Clear context-level resource caches (such as ASM metadata from scanning).
+    clearResourceCaches();
 
+    // Initialize lifecycle processor for this context.
+    initLifecycleProcessor();
+
+    // Propagate refresh to lifecycle processor first.
+    getLifecycleProcessor().onRefresh();
+
+    // Publish the final event.
+    publishEvent(new ContextRefreshedEvent(this));
+
+    // Participate in LiveBeansView MBean, if active.
+    if (!IN_NATIVE_IMAGE) {
+    LiveBeansView.registerApplicationContext(this);
+    }
+}
+```
+可以看出```Lifecycle```是在容器初始化最后一步完成调用的.所以在spring项目中,如果要在项目启动后开始
+一些定时任务,```SmartLifecycle```是一个很好的选择.
