@@ -22,8 +22,329 @@ distro协议被定位为临时数据一致性协议.该协议下,不需要把数
 - 服务端节点在收到读请求后直接从本机获取后返回,无论数据是否为最新
   
 ***从源码中解读distro协议:***
+- 服务注册
 
+```NacosNamingService```提供了服务注册接口,最终调用```serverProxy```完成服务注册
+```java
+public void registerInstance(String serviceName, String groupName, Instance instance) throws NacosException {
+    NamingUtils.checkInstanceIsLegal(instance);
+    String groupedServiceName = NamingUtils.getGroupedName(serviceName, groupName);
+    if (instance.isEphemeral()) {
+        BeatInfo beatInfo = beatReactor.buildBeatInfo(groupedServiceName, instance);
+        beatReactor.addBeatInfo(groupedServiceName, beatInfo);
+    }
+    serverProxy.registerService(groupedServiceName, groupName, instance);
+}
+```
 
+- 服务获取
+```java
+/**
+ * distro协议:服务端节点在收到读请求后直接从本机获取后返回,无论数据是否为最新
+ */
+```
+
+- 心跳发送
+```java
+/**
+ * 
+ *BeatReactor.java
+ *客户端心跳自动任务
+ * distro协议:客户端以服务为维度向服务端注册,注册后每隔一段时间向服务端发送一次心跳,心跳包需要带上注册
+ 服务的全部信息
+**/
+public void run() {
+    if (beatInfo.isStopped()) {
+        return;
+    }
+    long nextTime = beatInfo.getPeriod();
+    try {
+        //发送心跳,如果lightBeatEnabled为TRUE,则不包含服务信息
+        JsonNode result = serverProxy.sendBeat(beatInfo, BeatReactor.this.lightBeatEnabled);
+        //获取心跳间隔时间
+        long interval = result.get("clientBeatInterval").asLong();
+        boolean lightBeatEnabled = false;
+        //lightBeatEnabled可以被服务重置
+        if (result.has(CommonParams.LIGHT_BEAT_ENABLED)) {
+            lightBeatEnabled = result.get(CommonParams.LIGHT_BEAT_ENABLED).asBoolean();
+        }
+        BeatReactor.this.lightBeatEnabled = lightBeatEnabled;
+        if (interval > 0) {
+            nextTime = interval;
+        }
+        int code = NamingResponseCode.OK;
+        if (result.has(CommonParams.CODE)) {
+            code = result.get(CommonParams.CODE).asInt();
+        }
+        //如果服务端没有发现该服务,则注册该服务,当lightBeatEnabled为true时触发
+        if (code == NamingResponseCode.RESOURCE_NOT_FOUND) {
+            Instance instance = new Instance();
+            instance.setPort(beatInfo.getPort());
+            instance.setIp(beatInfo.getIp());
+            instance.setWeight(beatInfo.getWeight());
+            instance.setMetadata(beatInfo.getMetadata());
+            instance.setClusterName(beatInfo.getCluster());
+            instance.setServiceName(beatInfo.getServiceName());
+            instance.setInstanceId(instance.getInstanceId());
+            //如果切换cp模式,这里写死会有问题.
+            instance.setEphemeral(true);
+            try {
+                serverProxy.registerService(beatInfo.getServiceName(),
+                        NamingUtils.getGroupName(beatInfo.getServiceName()), instance);
+            } catch (Exception ignore) {
+            }
+        }
+    } catch (NacosException ex) {
+        NAMING_LOGGER.error("[CLIENT-BEAT] failed to send beat: {}, code: {}, msg: {}",
+                JacksonUtils.toJson(beatInfo), ex.getErrCode(), ex.getErrMsg());
+        
+    }
+    //下一次心跳任务
+    executorService.schedule(new BeatTask(beatInfo), nextTime, TimeUnit.MILLISECONDS);
+}
+
+/**
+*服务端接收心跳
+**/
+public ObjectNode beat(HttpServletRequest request) throws Exception {
+
+    //略...
+    //查询服务    
+    Instance instance = serviceManager.getInstance(namespaceId, serviceName, clusterName, ip, port);
+    //服务未找到
+    if (instance == null) {
+        //心跳不包含服务信息,返回not_found
+        if (clientBeat == null) {
+            result.put(CommonParams.CODE, NamingResponseCode.RESOURCE_NOT_FOUND);
+            return result;
+        }
+
+        Loggers.SRV_LOG.warn("[CLIENT-BEAT] The instance has been removed for health mechanism, "
+        + "perform data compensation operations, beat: {}, serviceName: {}", clientBeat, serviceName);
+        //心跳包包含服务信息,则注册服务
+        //distro协议:服务端在收到客户端服务的心跳后,如果该服务不存在,则将该心跳请求视为注册请求来处理
+        instance = new Instance();
+        instance.setPort(clientBeat.getPort());
+        instance.setIp(clientBeat.getIp());
+        instance.setWeight(clientBeat.getWeight());
+        instance.setMetadata(clientBeat.getMetadata());
+        instance.setClusterName(clusterName);
+        instance.setServiceName(serviceName);
+        instance.setInstanceId(instance.getInstanceId());
+        instance.setEphemeral(clientBeat.isEphemeral());
+    
+        serviceManager.registerInstance(namespaceId, serviceName, instance);
+    }
+
+    Service service = serviceManager.getService(namespaceId, serviceName);
+
+    if (service == null) {
+    throw new NacosException(NacosException.SERVER_ERROR,
+    "service not found: " + serviceName + "@" + namespaceId);
+    }
+    if (clientBeat == null) {
+        clientBeat = new RsInfo();
+        clientBeat.setIp(ip);
+        clientBeat.setPort(port);
+        clientBeat.setCluster(clusterName);
+    }
+    //监控信息更新,更新最后心跳时间
+    service.processClientBeat(clientBeat);
+
+    result.put(CommonParams.CODE, NamingResponseCode.OK);
+    if (instance.containsMetadata(PreservedMetadataKeys.HEART_BEAT_INTERVAL)) {
+        result.put(SwitchEntry.CLIENT_BEAT_INTERVAL, instance.getInstanceHeartBeatInterval());
+    }
+    result.put(SwitchEntry.LIGHT_BEAT_ENABLED, switchDomain.isLightBeatEnabled());
+    return result;
+}
+```
+
+- 客户端失败重试机制
+```java
+/**
+ * 客户端调用服务端最终接口
+ * distro协议:在客户端看来,服务端节点对等,所以请求的节点时随机的.
+ */
+public class NamingProxy implements Closeable {
+    public String reqApi(String api, Map<String, String> params, Map<String, String> body, List<String> servers,
+                         String method) throws NacosException {
+
+        params.put(CommonParams.NAMESPACE_ID, getNamespaceId());
+
+        if (CollectionUtils.isEmpty(servers) && StringUtils.isBlank(nacosDomain)) {
+            throw new NacosException(NacosException.INVALID_PARAM, "no server available");
+        }
+
+        NacosException exception = new NacosException();
+        //如果只有一个服务端,nacosDomain不为空,否则为空
+        if (StringUtils.isNotBlank(nacosDomain)) {
+            //默认会重试3次
+            for (int i = 0; i < maxRetry; i++) {
+                try {
+                    return callServer(api, params, body, nacosDomain, method);
+                } catch (NacosException e) {
+                    exception = e;
+                    if (NAMING_LOGGER.isDebugEnabled()) {
+                        NAMING_LOGGER.debug("request {} failed.", nacosDomain, e);
+                    }
+                }
+            }
+        } else {
+            //随机访问服务端,如果失败,发送给其他服务端
+            //distro协议:客户端请求失败则换一个节点重新发起请求
+            Random random = new Random(System.currentTimeMillis());
+            int index = random.nextInt(servers.size());
+
+            for (int i = 0; i < servers.size(); i++) {
+                String server = servers.get(index);
+                try {
+                    return callServer(api, params, body, server, method);
+                } catch (NacosException e) {
+                    exception = e;
+                    if (NAMING_LOGGER.isDebugEnabled()) {
+                        NAMING_LOGGER.debug("request {} failed.", server, e);
+                    }
+                }
+                index = (index + 1) % servers.size();
+            }
+        }
+
+        NAMING_LOGGER.error("request: {} failed, servers: {}, code: {}, msg: {}", api, servers, exception.getErrCode(),
+                            exception.getErrMsg());
+
+        throw new NacosException(exception.getErrCode(),
+                                 "failed to req API:" + api + " after all servers(" + servers + ") tried: " + exception.getMessage());
+
+    }
+}
+```
+
+- 客户端缓存服务端信息刷新机制
+在distro协议中,在客户端看来,服务端节点对等,所以请求节点时随机的.那么客户端需要有服务端节点的
+所有信息.在```NamingProxy```初始化的时候会请求一份服务端节点信息数据,后续定时更新.
+```java
+public class NamingProxy implements Closeable {
+    public NamingProxy(String namespaceId, String endpoint, String serverList, Properties properties) {
+
+        this.securityProxy = new SecurityProxy(properties, nacosRestTemplate);
+        this.properties = properties;
+        this.setServerPort(DEFAULT_SERVER_PORT);
+        this.namespaceId = namespaceId;
+        this.endpoint = endpoint;
+        this.maxRetry = ConvertUtils.toInt(properties.getProperty(PropertyKeyConst.NAMING_REQUEST_DOMAIN_RETRY_COUNT,
+                                                                  String.valueOf(UtilAndComs.REQUEST_DOMAIN_RETRY_COUNT)));
+        if (StringUtils.isNotEmpty(serverList)) {
+            this.serverList = Arrays.asList(serverList.split(","));
+            if (this.serverList.size() == 1) {
+                this.nacosDomain = serverList;
+            }
+        }
+        //在NamingProxy初始化的时候,创建定时任务并获取服务端节点信息
+        this.initRefreshTask();
+    }
+
+    private void initRefreshTask() {
+        //创建定时任务,可以看到,线程池的线程数量是写死的.
+        this.executorService = new ScheduledThreadPoolExecutor(2, new ThreadFactory() {
+            @Override
+            public Thread newThread(Runnable r) {
+                Thread t = new Thread(r);
+                t.setName("com.alibaba.nacos.client.naming.updater");
+                t.setDaemon(true);
+                return t;
+            }
+        });
+
+        this.executorService.scheduleWithFixedDelay(new Runnable() {
+            @Override
+            public void run() {
+                //默认30s,更新一次
+                refreshSrvIfNeed();
+            }
+        }, 0, vipSrvRefInterMillis, TimeUnit.MILLISECONDS);
+
+        this.executorService.scheduleWithFixedDelay(new Runnable() {
+            @Override
+            public void run() {
+                securityProxy.login(getServerList());
+            }
+        }, 0, securityInfoRefreshIntervalMills, TimeUnit.MILLISECONDS);
+
+        //获取服务端节点信息
+        refreshSrvIfNeed();
+        this.securityProxy.login(getServerList());
+    }
+}
+```
+
+- 服务健康检查任务
+```java
+/**
+ * distro协议:服务端如果长时间未收到客户端心跳后,则下线该服务
+ */
+public class Service extends com.alibaba.nacos.api.naming.pojo.Service implements Record, RecordListener<Instances> {
+    @JsonIgnore
+    private ClientBeatCheckTask clientBeatCheckTask = new ClientBeatCheckTask(this);
+    
+}
+
+public class ClientBeatCheckTask implements Runnable {
+    @Override
+    public void run() {
+        try {
+            if (!getDistroMapper().responsible(service.getName())) {
+                return;
+            }
+
+            if (!getSwitchDomain().isHealthCheckEnabled()) {
+                return;
+            }
+
+            List<Instance> instances = service.allIPs(true);
+
+            // first set health status of instances:
+            for (Instance instance : instances) {
+                if (System.currentTimeMillis() - instance.getLastBeat() > instance.getInstanceHeartBeatTimeOut()) {
+                    if (!instance.isMarked()) {
+                        if (instance.isHealthy()) {
+                            instance.setHealthy(false);
+                            getPushService().serviceChanged(service);
+                            ApplicationUtils.publishEvent(new InstanceHeartbeatTimeoutEvent(this, instance));
+                        }
+                    }
+                }
+            }
+
+            if (!getGlobalConfig().isExpireInstance()) {
+                return;
+            }
+
+            // then remove obsolete instances:
+            for (Instance instance : instances) {
+
+                if (instance.isMarked()) {
+                    continue;
+                }
+
+                if (System.currentTimeMillis() - instance.getLastBeat() > instance.getIpDeleteTimeout()) {
+                    // delete instance
+                    //ap模式下,每个服务节点负责部分数据的持久化,所以需要调用api来删除数据
+                    deleteIp(instance);
+                }
+            }
+
+        } catch (Exception e) {
+            Loggers.SRV_LOG.warn("Exception while processing client beat time out.", e);
+        }
+
+    }
+}
+```
+
+- 每个服务节点负责一部分数据
+在ap模式下,每个服务节点负责一部分数据,在nacos中,所有请求由```@CanDistro```拦截,判断哪个节点负责
+这个服务,然后转发.
 
 ### nacos config 配置管理中心
 
