@@ -20,7 +20,7 @@ distro协议被定位为临时数据一致性协议.该协议下,不需要把数
 - 负责的服务端节点在接收到服务注册,服务心跳等写请求后将数据写入后返回,后台异步同步数据到其他
   节点
 - 服务端节点在收到读请求后直接从本机获取后返回,无论数据是否为最新
-  
+
 ***从源码中解读distro协议:***
 - 服务注册
 
@@ -343,8 +343,151 @@ public class ClientBeatCheckTask implements Runnable {
 ```
 
 - 每个服务节点负责一部分数据
-在ap模式下,每个服务节点负责一部分数据,在nacos中,所有请求由```@CanDistro```拦截,判断哪个节点负责
-这个服务,然后转发.
+
+  在ap模式下,每个服务节点负责一部分数据,在nacos中,所有请求由```@CanDistro```拦截,判断哪个节点负责
+  这个服务,然后转发.
+  触发转发的操作有:注册,取消注册(心跳检测失败),服务更新.
+
+  ```java
+  public class ServiceManager implements RecordListener<Service> {
+          /**
+          *服务注册
+          **/
+          public void addInstance(String namespaceId, String serviceName, boolean ephemeral, Instance... ips)
+              throws NacosException {
+          
+          String key = KeyBuilder.buildInstanceListKey(namespaceId, serviceName, ephemeral);
+          
+          Service service = getService(namespaceId, serviceName);
+          
+          synchronized (service) {
+              List<Instance> instanceList = addIpAddresses(service, ephemeral, ips);
+              
+              Instances instances = new Instances();
+              instances.setInstanceList(instanceList);
+              //在这里,ephemeral=true,所以是distro协议的持久化,异步发送注册信息给其他服务端节点
+              consistencyService.put(key, instances);
+          }
+      }
+      
+      /**
+      *服务下线
+      */
+      private void removeInstance(String namespaceId, String serviceName, boolean ephemeral, Service service,
+              Instance... ips) throws NacosException {
+          
+          String key = KeyBuilder.buildInstanceListKey(namespaceId, serviceName, ephemeral);
+          
+          List<Instance> instanceList = substractIpAddresses(service, ephemeral, ips);
+          
+          Instances instances = new Instances();
+          instances.setInstanceList(instanceList);
+          //同服务注册
+          consistencyService.put(key, instances);
+      }
+  }
+  
+  /**
+  *distro协议对应的持久化服务
+  */
+  public class DistroConsistencyServiceImpl implements EphemeralConsistencyService, DistroDataProcessor {
+      @Override
+      public void put(String key, Record value) throws NacosException {
+          //更新本地
+          onPut(key, value);
+          //异步同步信息给服务端节点
+          //这里的话,任务延迟执行,如果短时间内有相同的任务会合并处理,有效减少task数量
+          distroProtocol.sync(new DistroKey(key, KeyBuilder.INSTANCE_LIST_KEY_PREFIX), DataOperation.CHANGE,
+                  globalConfig.getTaskDispatchPeriod() / 2);
+      }
+  }
+  ```
+
+- nacos集群节点定时报告任务
+
+  nacos通过节点定时报告来同步nacos服务节点的健康状态,超过3次未报告或者异常为```Connection refused```,将节点状态设置为```DOWN```.
+  参数```nacos.core.member.fail-access-cnt```可配置失败次数.未超过指定次数,将节点状态设置为```SUSPICIOUS```.
+  该定时任务2s运行一次,线程名为```com.alibaba.nacos.core.common```,线程数据为```4```,不可配置.
+  pis:每2s向其中一个集群节点报告状态,不是向所有节点
+```java
+class MemberInfoReportTask extends Task {
+    private final GenericType<RestResult<String>> reference = new GenericType<RestResult<String>>() {
+    };
+
+    private int cursor = 0;
+
+    @Override
+    protected void executeBody() {
+        List<Member> members = ServerMemberManager.this.allMembersWithoutSelf();
+
+        if (members.isEmpty()) {
+            return;
+        }
+
+        this.cursor = (this.cursor + 1) % members.size();
+        Member target = members.get(cursor);
+
+        Loggers.CLUSTER.debug("report the metadata to the node : {}", target.getAddress());
+
+        final String url = HttpUtils
+                .buildUrl(false, target.getAddress(), EnvUtil.getContextPath(), Commons.NACOS_CORE_CONTEXT,
+                          "/cluster/report");
+
+        try {
+            asyncRestTemplate
+                    .post(url, Header.newInstance().addParam(Constants.NACOS_SERVER_HEADER, VersionUtils.version),
+                          Query.EMPTY, getSelf(), reference.getType(), new Callback<String>() {
+                                @Override
+                                public void onReceive(RestResult<String> result) {
+                                    if (result.getCode() == HttpStatus.NOT_IMPLEMENTED.value()
+                                            || result.getCode() == HttpStatus.NOT_FOUND.value()) {
+                                        Loggers.CLUSTER
+                                                .warn("{} version is too low, it is recommended to upgrade the version : {}",
+                                                      target, VersionUtils.version);
+                                        return;
+                                    }
+                                    if (result.ok()) {
+                                        MemberUtil.onSuccess(ServerMemberManager.this, target);
+                                    } else {
+                                        Loggers.CLUSTER
+                                                .warn("failed to report new info to target node : {}, result : {}",
+                                                      target.getAddress(), result);
+                                        MemberUtil.onFail(ServerMemberManager.this, target);
+                                    }
+                                }
+
+                                @Override
+                                public void onError(Throwable throwable) {
+                                    Loggers.CLUSTER
+                                            .error("failed to report new info to target node : {}, error : {}",
+                                                   target.getAddress(),
+                                                   ExceptionUtil.getAllExceptionMsg(throwable));
+                                    MemberUtil.onFail(ServerMemberManager.this, target, throwable);
+                                }
+
+                                @Override
+                                public void onCancel() {
+
+                                }
+                            });
+        } catch (Throwable ex) {
+            Loggers.CLUSTER.error("failed to report new info to target node : {}, error : {}", target.getAddress(),
+                                  ExceptionUtil.getAllExceptionMsg(ex));
+        }
+    }
+
+    @Override
+    protected void after() {
+        GlobalExecutor.scheduleByCommon(this, 2_000L);
+    }
+}
+```
+
+- nacos注册服务定时报告任务
+  
+  在ap模式下,每个nacos服务端负责部分数据,而在获取注册服务的时候是从本地直接返回.所以需要nacos服务端定时向其他服务节点同步数据. 
+  虽然nacos节点在服务上下线的时候会异步通知其他节点,但是并不保证一定会通知到,有报错重试机制.
+  
 
 ### nacos config 配置管理中心
 
