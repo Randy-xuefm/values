@@ -9,16 +9,14 @@ distro协议被定位为临时数据一致性协议.该协议下,不需要把数
 
 ***distro协议内容如下:***
 - 客户端与服务端有两个重要的交互,服务注册与心跳发送
-- 客户端以服务为维度向服务端注册,注册后每隔一段时间向服务端发送一次心跳,心跳包需要带上注册
-  服务的全部信息.在客户端看来,服务端节点对等,所以请求的节点时随机的.
+- 客户端以服务为维度向服务端注册,注册后每隔一段时间向服务端发送一次心跳,心跳包需要带上注册服务的全部信息.在客户端看来,服务端节点对等,所以请求的节点时随机的.
 - 客户端请求失败则换一个节点重新发起请求
-- 服务端节点存储所有数据,但每个节点只负责其中一部分服务,在接收到客户端"写"(注册,上线,下线)
-  请求后,服务端节点判断请求的服务是否为自己负责,如果是,则处理,否则交给负责节点处理.
+- 服务端节点存储所有数据,但每个节点只负责其中一部分服务,在接收到客户端"写"(注册,上线,下线)请求后,服务端节点判断请求的服务是否为自己负责,
+  如果是,则处理,否则交给负责节点处理.
 - 每个服务端主动发送健康检查到其他服务节点,有响应的节点被视为健康节点.
 - 服务端在收到客户端服务的心跳后,如果该服务不存在,则将该心跳请求视为注册请求来处理
 - 服务端如果长时间未收到客户端心跳后,则下线该服务
-- 负责的服务端节点在接收到服务注册,服务心跳等写请求后将数据写入后返回,后台异步同步数据到其他
-  节点
+- 负责的服务端节点在接收到服务注册,服务心跳等写请求后将数据写入后返回,后台异步同步数据到其他节点
 - 服务端节点在收到读请求后直接从本机获取后返回,无论数据是否为最新
 
 ***从源码中解读distro协议:***
@@ -221,6 +219,7 @@ public class NamingProxy implements Closeable {
 ```
 
 - 客户端缓存服务端信息刷新机制
+
 在distro协议中,在客户端看来,服务端节点对等,所以请求节点时随机的.那么客户端需要有服务端节点的
 所有信息.在```NamingProxy```初始化的时候会请求一份服务端节点信息数据,后续定时更新.
 ```java
@@ -396,7 +395,7 @@ public class ClientBeatCheckTask implements Runnable {
           //更新本地
           onPut(key, value);
           //异步同步信息给服务端节点
-          //这里的话,任务延迟执行,如果短时间内有相同的任务会合并处理,有效减少task数量
+          //这里的话,任务延迟执行,如果短时间内有相同的任务会合并处理,有效减少task数量,默认延迟1s执行,失败重试延迟3s执行.
           distroProtocol.sync(new DistroKey(key, KeyBuilder.INSTANCE_LIST_KEY_PREFIX), DataOperation.CHANGE,
                   globalConfig.getTaskDispatchPeriod() / 2);
       }
@@ -487,7 +486,70 @@ class MemberInfoReportTask extends Task {
   
   在ap模式下,每个nacos服务端负责部分数据,而在获取注册服务的时候是从本地直接返回.所以需要nacos服务端定时向其他服务节点同步数据. 
   虽然nacos节点在服务上下线的时候会异步通知其他节点,但是并不保证一定会通知到,有报错重试机制.
-  
+```java
+//ServiceManager.java
+private class ServiceReporter implements Runnable {
+    @Override
+    public void run() {
+        try {
+
+            Map<String, Set<String>> allServiceNames = getAllServiceNames();
+
+            if (allServiceNames.size() <= 0) {
+                //ignore
+                return;
+            }
+
+            for (String namespaceId : allServiceNames.keySet()) {
+
+                ServiceChecksum checksum = new ServiceChecksum(namespaceId);
+
+                for (String serviceName : allServiceNames.get(namespaceId)) {
+                    if (!distroMapper.responsible(serviceName)) {
+                        continue;
+                    }
+
+                    Service service = getService(namespaceId, serviceName);
+
+                    if (service == null || service.isEmpty()) {
+                        continue;
+                    }
+
+                    service.recalculateChecksum();
+
+                    checksum.addItem(serviceName, service.getChecksum());
+                }
+
+                Message msg = new Message();
+
+                msg.setData(JacksonUtils.toJson(checksum));
+
+                Collection<Member> sameSiteServers = memberManager.allMembers();
+
+                if (sameSiteServers == null || sameSiteServers.size() <= 0) {
+                    return;
+                }
+
+                for (Member server : sameSiteServers) {
+                    if (server.getAddress().equals(NetUtils.localServer())) {
+                        continue;
+                    }
+                    synchronizer.send(server.getAddress(), msg);
+                }
+            }
+        } catch (Exception e) {
+            Loggers.SRV_LOG.error("[DOMAIN-STATUS] Exception while sending service status", e);
+        } finally {
+            //默认5s执行一次,如果单次执行时间过长,下次任务也会延迟
+            GlobalExecutor.scheduleServiceReporter(this, switchDomain.getServiceStatusSynchronizationPeriodMillis(),
+                                                   TimeUnit.MILLISECONDS);
+        }
+    } 
+}
+```  
+  服务端在接收到/service/status请求后,会加入```toBeUpdatedServicesQueue```,最终由```com.alibaba.nacos.naming.service.update.http.handler```
+线程池执行.如果队列已满,会有warning日志警告,可以留意日志.
 
 ### nacos config 配置管理中心
+
 
