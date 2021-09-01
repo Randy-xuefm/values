@@ -1,4 +1,4 @@
-package com.example.nacosnaming;
+package com.example;
 
 import com.alibaba.nacos.api.common.Constants;
 import com.alibaba.nacos.api.exception.NacosException;
@@ -10,17 +10,15 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.ApplicationListener;
-import org.springframework.stereotype.Component;
 
 /**
  * Created by fenming.xue on 2021/8/12.
  */
-@Component
 public class NamingRegister implements ApplicationListener<ApplicationReadyEvent> {
 
     private final Logger logger = LoggerFactory.getLogger(NamingRegister.class);
 
-    private final NamingConfig config;
+    private final NacosProperties config;
 
     @Value("${spring.application.name}")
     private String serverName;
@@ -28,7 +26,7 @@ public class NamingRegister implements ApplicationListener<ApplicationReadyEvent
     @Value("${server.port}")
     private int port;
 
-    public NamingRegister(NamingConfig config){
+    public NamingRegister(NacosProperties config){
         this.config = config;
     }
 
