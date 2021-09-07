@@ -98,3 +98,12 @@ class SpringApplicationRunListeners {
 
 - **ApplicationFailedEvent**
 
+
+在springBoot中常见的几张扩展方式.
+
+- 通过监听Event事件,实现接口```ApplicationListener```
+
+- 针对容器Environment,有专门的```EnvironmentPostProcessor```可扩展
+
+- ```ApplicationContextInitializer```可以定制context容器,在springboot中,该接口是在ApplicationPreparedEvent之前调用的,所以还可以对Environment进行调整
+
