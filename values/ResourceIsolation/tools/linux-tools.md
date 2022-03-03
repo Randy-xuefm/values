@@ -1,8 +1,7 @@
 # 排查问题工具
 
 ## 网络
-
-1. iperf3
+- iperf3
 
 网络带宽质量测试,常用参数指南:
 -c/s：客户端模式/服务端模式
@@ -17,11 +16,12 @@
 
 -l：指定包大小，TCP默认8k，UDP默认1470字节
 
-2. ping
+- ping
 
 ## 内存
 
 1. swap空间
+
 首先获取pid,进入/proc/${pid}目录,找到smaps文件
 ```shell
 cat smaps | egrep '^(Swap|Size)'
