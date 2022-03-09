@@ -1,14 +1,13 @@
 package com.person.xue;
 
 import com.person.xue.entity.MouseXY;
+import com.person.xue.task.AliveTask;
 import com.person.xue.task.CaptureXYTask;
 import com.person.xue.task.FightTask;
 
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.locks.Condition;
-import java.util.concurrent.locks.ReentrantLock;
 import java.util.logging.Logger;
 
 /**
@@ -18,11 +17,8 @@ public class Main {
 
     private static Logger logger = Logger.getLogger("Main");
 
-    private static final ReentrantLock LOCK = new ReentrantLock();
-    private static final Condition STOP = LOCK.newCondition();
-
     public static void main(String[] args) throws Exception {
-
+        ScheduledExecutorService executorService = Executors.newSingleThreadScheduledExecutor();
         CaptureXYTask captureXYTask = new CaptureXYTask();
 
         MouseXY anchor = captureXYTask.call();
@@ -32,10 +28,15 @@ public class Main {
         }
 
         logger.info(anchor.toString());
+        executorService.scheduleAtFixedRate(new FightTask(anchor),120,120, TimeUnit.SECONDS);
+        logger.info("战斗永不停止！！！");
 
-        ScheduledExecutorService executorService = Executors.newSingleThreadScheduledExecutor();
-        executorService.scheduleAtFixedRate(new FightTask(anchor),0,120, TimeUnit.SECONDS);
-
+        MouseXY alive = captureXYTask.call();
+        if(alive != null){
+            logger.info(alive.toString());
+            executorService.scheduleAtFixedRate(new AliveTask(anchor),30,30, TimeUnit.SECONDS);
+            logger.info("大地母亲庇佑我！！！！");
+        }
 
         Thread.currentThread().join();
     }
