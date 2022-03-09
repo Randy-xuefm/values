@@ -34,7 +34,7 @@ public class Main {
         logger.info(anchor.toString());
 
         ScheduledExecutorService executorService = Executors.newSingleThreadScheduledExecutor();
-        executorService.scheduleAtFixedRate(new FightTask(anchor),0,60, TimeUnit.SECONDS);
+        executorService.scheduleAtFixedRate(new FightTask(anchor),0,120, TimeUnit.SECONDS);
 
 
         Thread.currentThread().join();
