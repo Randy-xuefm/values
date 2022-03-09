@@ -29,7 +29,7 @@ public class Main {
 
         logger.info(anchor.toString());
         executorService.scheduleAtFixedRate(new FightTask(anchor),120,120, TimeUnit.SECONDS);
-        logger.info("战斗永不停止！！！");
+        logger.info("月光与你同在！！！");
 
         MouseXY alive = captureXYTask.call();
         if(alive != null){
